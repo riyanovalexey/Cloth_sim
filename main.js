@@ -84,7 +84,7 @@ class PhysicsUI {
     }
 }
 
-// Класс для XPBD физики ткани
+// Класс для настоящей XPBD физики ткани
 class XPBDPhysics {
     constructor() {
         this.particles = [];
@@ -93,9 +93,9 @@ class XPBDPhysics {
         this.iterations = 4; // Количество итераций решателя
         this.gravity = new Vec3(0, -9.81, 0);
         
-        // Параметры материала
-        this.stretchStiffness = 1.0;
-        this.bendStiffness = 0.001;
+        // Параметры материала (теперь это α - обратные жесткости)
+        this.stretchStiffness = 0.01; // α для растяжения (меньше = жестче)
+        this.bendStiffness = 0.001;   // α для изгиба (меньше = жестче)
         this.damping = 0.99;
         
         // Дополнительные параметры
@@ -126,6 +126,11 @@ class XPBDPhysics {
                     geometry.vertices[vertexIndex + 2]
                 ),
                 prevPosition: new Vec3(
+                    geometry.vertices[vertexIndex],
+                    geometry.vertices[vertexIndex + 1],
+                    geometry.vertices[vertexIndex + 2]
+                ),
+                predictedPosition: new Vec3(
                     geometry.vertices[vertexIndex],
                     geometry.vertices[vertexIndex + 1],
                     geometry.vertices[vertexIndex + 2]
@@ -162,6 +167,12 @@ class XPBDPhysics {
         this.centerVertexIndex = centerY * (segmentsX + 1) + centerX;
         
         this.createConstraints(geometry);
+        
+        // Инициализируем множители Лагранжа только один раз
+        for (let i = 0; i < this.constraints.length; i++) {
+            this.constraints[i].lambda = 0.0;
+        }
+        
         console.log(`XPBD инициализирован: ${this.particles.length} частиц, ${this.constraints.length} ограничений`);
         console.log(`Центральная вершина: индекс ${this.centerVertexIndex}, движение ${this.centerVertexMotion ? 'включено' : 'выключено'}`);
     }
@@ -228,7 +239,8 @@ class XPBDPhysics {
             type: 'stretch',
             particles: [i, j],
             restLength: length,
-            stiffness: this.stretchStiffness
+            alpha: this.stretchStiffness, // α - обратная жесткость
+            lambda: 0.0 // Множитель Лагранжа для XPBD
         });
     }
     
@@ -236,7 +248,8 @@ class XPBDPhysics {
         this.constraints.push({
             type: 'bend',
             particles: [i, j, k],
-            stiffness: this.bendStiffness
+            alpha: this.bendStiffness, // α - обратная жесткость
+            lambda: 0.0 // Множитель Лагранжа для XPBD
         });
     }
     
@@ -252,15 +265,15 @@ class XPBDPhysics {
         // Обновляем гравитацию
         this.gravity.y = -this.gravityStrength;
         
-        // Применяем силы и обновляем скорости
+        // XPBD Algorithm - Step 1: Update velocities and predict positions
         for (let i = 0; i < this.particles.length; i++) {
             const p = this.particles[i];
             if (p.isFixed) continue;
             
-            // Сохраняем предыдущую позицию
+            // Сохраняем текущую позицию
             p.prevPosition = new Vec3(p.position.x, p.position.y, p.position.z);
             
-            // Применяем гравитацию
+            // Применяем внешние силы (гравитация, ветер)
             p.velocity.x += this.gravity.x * this.dt;
             p.velocity.y += this.gravity.y * this.dt;
             p.velocity.z += this.gravity.z * this.dt;
@@ -283,53 +296,76 @@ class XPBDPhysics {
             p.velocity.y *= this.damping;
             p.velocity.z *= this.damping;
             
-            // Обновляем позицию
-            p.position.x += p.velocity.x * this.dt;
-            p.position.y += p.velocity.y * this.dt;
-            p.position.z += p.velocity.z * this.dt;
+            // Предсказываем позицию: P_i = X_i + Δt * V_i
+            p.predictedPosition = new Vec3(
+                p.position.x + p.velocity.x * this.dt,
+                p.position.y + p.velocity.y * this.dt,
+                p.position.z + p.velocity.z * this.dt
+            );
+            
+            // Копируем предсказанную позицию в текущую для решения ограничений
+            p.position.x = p.predictedPosition.x;
+            p.position.y = p.predictedPosition.y;
+            p.position.z = p.predictedPosition.z;
         }
         
-        // Применяем синусоидальное движение к центральной вершине
+        // Применяем синусоидальное движение к центральной вершине ПОСЛЕ копирования позиций
         if (this.centerVertexMotion && this.centerVertexIndex >= 0 && this.centerVertexIndex < this.particles.length) {
             const centerParticle = this.particles[this.centerVertexIndex];
             const originalY = 0; // Исходная Y координата центральной вершины
             const sineOffset = Math.sin(this.time * this.centerVertexFrequency) * this.centerVertexAmplitude;
+            // Обновляем текущую позицию напрямую
             centerParticle.position.y = originalY + sineOffset;
         }
         
-        // Решаем ограничения
+        // XPBD Algorithm - Step 2: Initialize Lagrange multipliers (только при первом запуске)
+        // НЕ сбрасываем lambda каждый кадр - они должны накапливаться!
+        
+        // XPBD Algorithm - Step 3: Solve constraints iteratively
         for (let iter = 0; iter < this.iterations; iter++) {
-            this.solveConstraints();
+            this.solveXPBDConstraints();
         }
         
-        // Обновляем скорости на основе новых позиций
+        // Демпфирование множителей Лагранжа для предотвращения дребезжания
+        this.dampLagrangeMultipliers();
+        
+        // XPBD Algorithm - Step 4: Update velocities based on corrected positions
         for (let i = 0; i < this.particles.length; i++) {
             const p = this.particles[i];
             if (p.isFixed) continue;
             
+            // V_i = (X_i - X_prev) / Δt (скорость на основе изменений позиции)
             p.velocity.x = (p.position.x - p.prevPosition.x) / this.dt;
             p.velocity.y = (p.position.y - p.prevPosition.y) / this.dt;
             p.velocity.z = (p.position.z - p.prevPosition.z) / this.dt;
+            
+            // Дополнительное демпфирование скоростей для стабильности
+            const velocityDamping = 1.0; // Отключено демпфирование
+            p.velocity.x *= velocityDamping;
+            p.velocity.y *= velocityDamping;
+            p.velocity.z *= velocityDamping;
         }
     }
     
-    solveConstraints() {
+    // Новый XPBD решатель согласно формуле (11)
+    solveXPBDConstraints() {
         for (let i = 0; i < this.constraints.length; i++) {
             const constraint = this.constraints[i];
             
             if (constraint.type === 'stretch') {
-                this.solveStretchConstraint(constraint);
+                this.solveXPBDStretchConstraint(constraint);
             } else if (constraint.type === 'bend') {
-                this.solveBendConstraint(constraint);
+                this.solveXPBDBendConstraint(constraint);
             }
         }
     }
     
-    solveStretchConstraint(constraint) {
+    solveXPBDStretchConstraint(constraint) {
         const [i, j] = constraint.particles;
         const p1 = this.particles[i];
         const p2 = this.particles[j];
         
+        // Работаем с текущими позициями (которые уже содержат предсказанные)
         const dx = p2.position.x - p1.position.x;
         const dy = p2.position.y - p1.position.y;
         const dz = p2.position.z - p1.position.z;
@@ -337,18 +373,38 @@ class XPBDPhysics {
         const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (currentLength === 0) return;
         
-        const error = currentLength - constraint.restLength;
-        const invMass1 = p1.invMass;
-        const invMass2 = p2.invMass;
-        const totalInvMass = invMass1 + invMass2;
+        // C_j(X) - функция ограничения (ошибка)
+        const C = currentLength - constraint.restLength;
         
-        if (totalInvMass === 0) return;
+        // Вычисляем градиент ограничения
+        const gradX = dx / currentLength;
+        const gradY = dy / currentLength;
+        const gradZ = dz / currentLength;
         
-        const lambda = -error / (totalInvMass * constraint.stiffness);
+        // α̃ = α * Δt² (исправленная формула)
+        const alphaTilde = constraint.alpha * (this.dt * this.dt);
         
-        const correctionX = lambda * dx / currentLength;
-        const correctionY = lambda * dy / currentLength;
-        const correctionZ = lambda * dz / currentLength;
+        // Вычисляем знаменатель: ∇C·M⁻¹·∇Cᵀ + α̃
+        const invMass1 = p1.isFixed ? 0 : p1.invMass;
+        const invMass2 = p2.isFixed ? 0 : p2.invMass;
+        const denominator = (invMass1 + invMass2) + alphaTilde;
+        
+        if (denominator === 0) return;
+        
+        // Формула (11): Δλ = -(C + α̃·λ) / (∇C·M⁻¹·∇Cᵀ + α̃)
+        const deltaLambda = -(C + alphaTilde * constraint.lambda) / denominator;
+        
+        // Ограничиваем изменение lambda для стабильности
+        const maxDeltaLambda = 1.0;
+        const clampedDeltaLambda = Math.max(-maxDeltaLambda, Math.min(maxDeltaLambda, deltaLambda));
+        
+        // Обновляем множитель Лагранжа
+        constraint.lambda += clampedDeltaLambda;
+        
+        // Применяем коррекцию к предсказанным позициям
+        const correctionX = clampedDeltaLambda * gradX;
+        const correctionY = clampedDeltaLambda * gradY;
+        const correctionZ = clampedDeltaLambda * gradZ;
         
         if (!p1.isFixed) {
             p1.position.x -= correctionX * invMass1;
@@ -363,14 +419,14 @@ class XPBDPhysics {
         }
     }
     
-    solveBendConstraint(constraint) {
-        // Упрощенная реализация ограничения на изгиб
+    solveXPBDBendConstraint(constraint) {
+        // Упрощенная реализация ограничения на изгиб для XPBD
         const [i, j, k] = constraint.particles;
         const p1 = this.particles[i];
         const p2 = this.particles[j];
         const p3 = this.particles[k];
         
-        // Вычисляем нормали к плоскостям
+        // Вычисляем нормали к плоскостям (работаем с текущими позициями)
         const v1 = Vec3.subtract(p2.position, p1.position);
         const v2 = Vec3.subtract(p3.position, p1.position);
         const normal = Vec3.cross(v1, v2);
@@ -383,13 +439,60 @@ class XPBDPhysics {
         normal.y /= normalLength;
         normal.z /= normalLength;
         
-        // Применяем небольшое ограничение на изгиб
-        const bendStrength = 0.1 * constraint.stiffness;
+        // Простая функция ограничения для изгиба (угол между нормалями)
+        const C = normalLength * 0.01; // Упрощенная мера изгиба
+        
+        // α̃ = α * Δt² (исправленная формула)
+        const alphaTilde = constraint.alpha * (this.dt * this.dt);
+        
+        // Упрощенный градиент
+        const gradX = normal.x * 0.01;
+        const gradY = normal.y * 0.01;
+        const gradZ = normal.z * 0.01;
+        
+        const invMass1 = p1.isFixed ? 0 : p1.invMass;
+        const invMass2 = p2.isFixed ? 0 : p2.invMass;
+        const invMass3 = p3.isFixed ? 0 : p3.invMass;
+        const denominator = (invMass1 + invMass2 + invMass3) + alphaTilde;
+        
+        if (denominator === 0) return;
+        
+        // Формула (11) для изгиба
+        const deltaLambda = -(C + alphaTilde * constraint.lambda) / denominator;
+        
+        // Ограничиваем изменение lambda для стабильности
+        const maxDeltaLambda = 0.5; // Меньше для изгиба
+        const clampedDeltaLambda = Math.max(-maxDeltaLambda, Math.min(maxDeltaLambda, deltaLambda));
+        
+        constraint.lambda += clampedDeltaLambda;
+        
+        // Применяем коррекцию
+        const correctionX = clampedDeltaLambda * gradX;
+        const correctionY = clampedDeltaLambda * gradY;
+        const correctionZ = clampedDeltaLambda * gradZ;
         
         if (!p1.isFixed) {
-            p1.position.x += normal.x * bendStrength * 0.01;
-            p1.position.y += normal.y * bendStrength * 0.01;
-            p1.position.z += normal.z * bendStrength * 0.01;
+            p1.position.x += correctionX * invMass1;
+            p1.position.y += correctionY * invMass1;
+            p1.position.z += correctionZ * invMass1;
+        }
+    }
+    
+    // Демпфирование множителей Лагранжа для предотвращения дребезжания
+    dampLagrangeMultipliers() {
+        const lambdaDamping = 0.95; // Коэффициент демпфирования для lambda
+        
+        for (let i = 0; i < this.constraints.length; i++) {
+            const constraint = this.constraints[i];
+            
+            // Применяем демпфирование к множителям Лагранжа
+            constraint.lambda *= lambdaDamping;
+            
+            // Ограничиваем максимальные значения lambda для предотвращения взрывов
+            const maxLambda = 10.0;
+            if (Math.abs(constraint.lambda) > maxLambda) {
+                constraint.lambda = Math.sign(constraint.lambda) * maxLambda;
+            }
         }
     }
     
@@ -418,20 +521,20 @@ class XPBDPhysics {
     
     setStretchStiffness(value) {
         this.stretchStiffness = Math.max(0.6, Math.min(2.0, value));
-        // Обновляем жесткость в существующих ограничениях
+        // Обновляем α (обратную жесткость) в существующих ограничениях
         for (let i = 0; i < this.constraints.length; i++) {
             if (this.constraints[i].type === 'stretch') {
-                this.constraints[i].stiffness = this.stretchStiffness;
+                this.constraints[i].alpha = this.stretchStiffness;
             }
         }
     }
     
     setBendStiffness(value) {
         this.bendStiffness = Math.max(0.001, Math.min(0.1, value));
-        // Обновляем жесткость в существующих ограничениях
+        // Обновляем α (обратную жесткость) в существующих ограничениях
         for (let i = 0; i < this.constraints.length; i++) {
             if (this.constraints[i].type === 'bend') {
-                this.constraints[i].stiffness = this.bendStiffness;
+                this.constraints[i].alpha = this.bendStiffness;
             }
         }
     }
@@ -482,6 +585,21 @@ class XPBDPhysics {
             p.velocity.y = 0;
             p.velocity.z = 0;
         }
+        
+        // Сбрасываем множители Лагранжа
+        for (let i = 0; i < this.constraints.length; i++) {
+            this.constraints[i].lambda = 0.0;
+        }
+        
+        console.log('XPBD сброшен - все множители Лагранжа обнулены');
+    }
+    
+    // Метод для принудительного сброса множителей Лагранжа (можно вызвать при сильном дребезжании)
+    resetLagrangeMultipliers() {
+        for (let i = 0; i < this.constraints.length; i++) {
+            this.constraints[i].lambda = 0.0;
+        }
+        console.log('Множители Лагранжа принудительно сброшены');
     }
 }
 
@@ -582,6 +700,7 @@ class WebGPURenderer {
         console.log('  Space/Shift - вверх/вниз');
         console.log('  Мышь - поворот камеры');
         console.log('  T - переключение wireframe/triangles');
+        console.log('  R - сброс множителей Лагранжа (при дребезжании)');
         console.log('  Все остальные настройки доступны через UI панель справа');
     }
 
@@ -916,6 +1035,13 @@ class WebGPURenderer {
             if (event.code === 'KeyT') {
                 this.wireframeMode = !this.wireframeMode;
                 if (this.ui) this.ui.updateWireframeButton();
+            }
+            
+            // Сброс множителей Лагранжа при дребезжании
+            if (event.code === 'KeyR') {
+                if (this.physics) {
+                    this.physics.resetLagrangeMultipliers();
+                }
             }
         });
 
