@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Triangle Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+        
+        .container {
+            display: flex;
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .canvas-container {
+            flex: 1;
+        }
+        
+        canvas {
+            border: 1px solid #333;
+            display: block;
+            margin: 0 auto;
+            background-color: #000;
+        }
+        
+        .controls {
+            width: 300px;
+            background-color: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        
+        .info {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .error {
+            color: #ff6b6b;
+            text-align: center;
+            margin: 20px;
+        }
+        
+        .control-group {
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #444;
+        }
+        
+        .control-group:last-child {
+            border-bottom: none;
+        }
+        
+        .control-group h3 {
+            margin: 0 0 10px 0;
+            color: #4a9eff;
+            font-size: 16px;
+        }
+        
+        .control-item {
+            margin-bottom: 12px;
+        }
+        
+        .control-item label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+            color: #ccc;
+        }
+        
+        .control-item input[type="range"] {
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        
+        .control-item .value {
+            font-size: 12px;
+            color: #888;
+            text-align: right;
+        }
+        
+        .control-item input[type="number"] {
+            width: 60px;
+            background-color: #333;
+            border: 1px solid #555;
+            color: white;
+            padding: 4px;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+        
+        .force-direction {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .force-direction input {
+            width: 50px;
+        }
+        
+        .button {
+            background-color: #4a9eff;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .button:hover {
+            background-color: #5aaeff;
+        }
+        
+        .button.danger {
+            background-color: #ff4444;
+        }
+        
+        .button.danger:hover {
+            background-color: #ff5555;
+        }
+    </style>
+</head>
+<body>
+    <div class="info">
+        <h1>WebGPU XPBD Cloth Simulation</h1>
+        <p><strong>Управление:</strong> WASD - движение камеры, Space/Shift - вверх/вниз, мышь - поворот, T - переключение wireframe/triangles</p>
+    </div>
+    
+    <div class="container">
+        <div class="canvas-container">
+            <canvas id="canvas" width="800" height="600"></canvas>
+        </div>
+        
+        <div class="controls">
+            <div class="control-group">
+                <h3>Режимы</h3>
+                <button class="button" id="toggleWireframe">wireframe</button>
+            </div>
+            
+            <div class="control-group">
+                <h3>Силы</h3>
+                <div class="control-item">
+                    <label>Гравитация</label>
+                    <input type="range" id="gravitySlider" min="0" max="20" step="0.1" value="9.81">
+                    <div class="value" id="gravityValue">9.81</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Дополнительная сила</label>
+                    <input type="range" id="windSlider" min="0" max="50" step="0.5" value="0">
+                    <div class="value" id="windValue">0.0</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Направление силы</label>
+                    <div class="force-direction">
+                        <input type="number" id="forceX" value="1" step="0.1" placeholder="X">
+                        <input type="number" id="forceY" value="0" step="0.1" placeholder="Y">
+                        <input type="number" id="forceZ" value="0" step="0.1" placeholder="Z">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <h3>Движение центра</h3>
+                <div class="control-item">
+                    <label>
+                        <input type="checkbox" id="centerMotionToggle" checked>
+                        Включить движение
+                    </label>
+                </div>
+                
+                <div class="control-item">
+                    <label>Амплитуда</label>
+                    <input type="range" id="centerAmplitudeSlider" min="0.1" max="2" step="0.1" value="0.3">
+                    <div class="value" id="centerAmplitudeValue">0.3</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Частота</label>
+                    <input type="range" id="centerFrequencySlider" min="0.1" max="10" step="0.1" value="8.0">
+                    <div class="value" id="centerFrequencyValue">8.0</div>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <h3>Материал</h3>
+                <div class="control-item">
+                    <label>Жесткость растяжения</label>
+                    <input type="range" id="stretchSlider" min="0.6" max="2" step="0.001" value="1.0">
+                    <div class="value" id="stretchValue">1.000</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Жесткость изгиба</label>
+                    <input type="range" id="bendSlider" min="0.001" max="0.1" step="0.001" value="0.001">
+                    <div class="value" id="bendValue">0.001</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Демпфирование</label>
+                    <input type="range" id="dampingSlider" min="0.1" max="1" step="0.001" value="0.99">
+                    <div class="value" id="dampingValue">0.990</div>
+                </div>
+                
+                <div class="control-item">
+                    <label>Сопротивление воздуха</label>
+                    <input type="range" id="airResistanceSlider" min="0" max="0.1" step="0.001" value="0.01">
+                    <div class="value" id="airResistanceValue">0.010</div>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <h3>Симуляция</h3>
+                <div class="control-item">
+                    <label>Итерации</label>
+                    <input type="range" id="iterationsSlider" min="1" max="20" step="1" value="4">
+                    <div class="value" id="iterationsValue">4</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="error" class="error" style="display: none;"></div>
+    
+    <script src="math3d.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
